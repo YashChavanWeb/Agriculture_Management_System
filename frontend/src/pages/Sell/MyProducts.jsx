@@ -1,134 +1,433 @@
-// src/pages/Sell/MyProducts.jsx
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
-import { Container, Row, Col, Card, Button, Spinner } from 'react-bootstrap';
-import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../../contexts/AuthContext';
-import { useTranslation } from 'react-i18next';
 import 'bootstrap/dist/css/bootstrap.min.css';
+import 'react-datepicker/dist/react-datepicker.css';
+import { Carousel, Button, Form, Col, Row, Card, Alert, Spinner } from 'react-bootstrap';
+import axios from 'axios';
+import { storage } from '../../components/firebase';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { useTranslation } from 'react-i18next';
+import DatePicker from 'react-datepicker';
+import { useNavigate, useParams } from 'react-router-dom';
+import '../../styles/Sell/ProductForm.css';
 
-const MyProducts = () => {
-    const { t } = useTranslation(); // Initialize translation hook
-    const [products, setProducts] = useState([]);
-    const [error, setError] = useState('');
-    const [loading, setLoading] = useState(true);
+const ProductForm = () => {
+    const { t } = useTranslation();
     const navigate = useNavigate();
-    const { isAuthenticated } = useAuth();
+    const { id } = useParams(); // Get the product ID from URL parameters
 
+    // State hooks
+    const [productName, setProductName] = useState('');
+    const [productDescription, setProductDescription] = useState('');
+    const [productPrice, setProductPrice] = useState('');
+    const [productCategory, setProductCategory] = useState('');
+    const [rentalDuration, setRentalDuration] = useState('');
+    const [availabilityDates, setAvailabilityDates] = useState({ startDate: null, endDate: null });
+    const [depositAmount, setDepositAmount] = useState('');
+    const [condition, setCondition] = useState('');
+    const [contactInfo, setContactInfo] = useState({ phone: '', email: '' });
+    const [productImages, setProductImages] = useState([]);
+    const [location, setLocation] = useState('');
+    const [imageError, setImageError] = useState('');
+    const [submitMessage, setSubmitMessage] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [existingImages, setExistingImages] = useState([]);
+
+    // Fetch product details if updating
     useEffect(() => {
-        if (!isAuthenticated) {
-            navigate('/signin');
-            return;
-        }
-
-        const fetchProducts = async () => {
+        const fetchProductData = async () => {
             try {
-                const token = localStorage.getItem('token');
-                const userInfo = JSON.parse(localStorage.getItem('userInfo'));
+                const response = await axios.get(`http://localhost:3000/api/products/${id}`);
+                const product = response.data;
 
-                if (!token || !userInfo || !userInfo.username) {
-                    setError(t('myProducts.userNotAuthenticated'));
-                    setLoading(false);
-                    return;
-                }
-
-                const response = await axios.get('http://localhost:3000/api/products', {
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                    },
+                setProductName(product.name);
+                setProductDescription(product.description);
+                setProductPrice(product.price);
+                setProductCategory(product.type);
+                setLocation(product.location);
+                setRentalDuration(product.rentalDuration);
+                setDepositAmount(product.depositAmount);
+                setCondition(product.condition);
+                setContactInfo(product.contactInfo);
+                setAvailabilityDates({
+                    startDate: new Date(product.availabilityDates[0].startDate),
+                    endDate: new Date(product.availabilityDates[0].endDate)
                 });
-
-                // Filter products to match the current user's username
-                const userProducts = response.data.filter(product => product.username === userInfo.username);
-                setProducts(userProducts);
-            } catch (err) {
-                setError(t('myProducts.fetchError'));
-                console.error('Error fetching products:', err);
-            } finally {
-                setLoading(false);
+                setExistingImages(product.images);
+            } catch (error) {
+                console.error('Error fetching product data:', error);
             }
         };
 
-        fetchProducts();
-    }, [isAuthenticated, navigate, t]);
+        if (id) {
+            fetchProductData();
+        }
+    }, [id]);
 
-    const handleAddProductClick = () => {
-        navigate('/products/add');
+    useEffect(() => {
+        if (productPrice) {
+            setDepositAmount((parseFloat(productPrice) / 2).toString());
+        }
+    }, [productPrice]);
+
+    useEffect(() => {
+        if (availabilityDates.startDate) {
+            const newEndDate = new Date(availabilityDates.startDate);
+            if (rentalDuration === '1 week') {
+                newEndDate.setDate(newEndDate.getDate() + 7);
+            } else if (rentalDuration === '1 month') {
+                newEndDate.setMonth(newEndDate.getMonth() + 1);
+            } else if (rentalDuration === '3 months') {
+                newEndDate.setMonth(newEndDate.getMonth() + 3);
+            } else if (rentalDuration === '6 months') {
+                newEndDate.setMonth(newEndDate.getMonth() + 6);
+            } else if (rentalDuration === '1 year') {
+                newEndDate.setFullYear(newEndDate.getFullYear() + 1);
+            }
+            setAvailabilityDates(prev => ({ ...prev, endDate: newEndDate }));
+        }
+    }, [rentalDuration, availabilityDates.startDate]);
+
+    const handleImageChange = (e) => {
+        const files = Array.from(e.target.files);
+        const validImages = files.filter(file => file.type.startsWith('image/'));
+
+        if (validImages.length !== files.length) {
+            setImageError(t('error.invalidFileType'));
+            return;
+        }
+
+        if (validImages.length > 5) {
+            setImageError(t('error.maxImages'));
+            return;
+        }
+
+        setImageError('');
+        setProductImages(validImages);
     };
 
-    const handleDeleteProduct = async (id) => {
-        if (window.confirm(t('myProducts.confirmDelete'))) {
-            try {
-                const token = localStorage.getItem('token');
-                await axios.delete(`http://localhost:3000/api/products/${id}`, {
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                    },
+    const removeImage = (index) => {
+        setProductImages(prevImages => prevImages.filter((_, i) => i !== index));
+    };
+
+    const uploadImagesToFirebase = async (files, path) => {
+        const uploadedImageURLs = [];
+        const uploadPromises = files.map((file) => {
+            const storageRef = ref(storage, `${path}/${file.name}`);
+            return uploadBytes(storageRef, file)
+                .then(() => getDownloadURL(storageRef))
+                .then((downloadURL) => uploadedImageURLs.push(downloadURL))
+                .catch((error) => {
+                    console.error("Error uploading file:", error);
+                    throw new Error(t('error.uploadFailed'));
                 });
-                setProducts(products.filter(product => product._id !== id));
-            } catch (err) {
-                setError(t('myProducts.deleteError'));
-                console.error('Error deleting product:', err);
+        });
+
+        await Promise.all(uploadPromises);
+        return uploadedImageURLs;
+    };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setIsSubmitting(true);
+        try {
+            const userInfo = JSON.parse(localStorage.getItem('userInfo'));
+
+            if (!userInfo || !userInfo.token || !userInfo.username) {
+                throw new Error(t('error.authError'));
             }
+
+            const { token, username } = userInfo;
+
+            const userPath = `users/${username}`;
+            const imagePath = `${userPath}/${productName}/images`;
+            const imageURLs = await uploadImagesToFirebase(productImages, imagePath);
+
+            const roundedPrice = Math.ceil(parseFloat(productPrice));
+            const roundedDeposit = Math.ceil(parseFloat(depositAmount));
+
+            const formData = {
+                username,
+                name: productName,
+                description: productDescription,
+                price: roundedPrice,
+                type: productCategory,
+                location,
+                rentalDuration,
+                available: availabilityDates.startDate ? true : false,
+                depositAmount: roundedDeposit,
+                condition,
+                contactInfo,
+                images: [...existingImages, ...imageURLs], // Merge existing images with new ones
+                category: productCategory,
+                tags: [],
+                rentalTerms: "",
+                reviews: [],
+                availabilityDates: [
+                    {
+                        startDate: availabilityDates.startDate ? new Date(availabilityDates.startDate) : null,
+                        endDate: availabilityDates.endDate ? new Date(availabilityDates.endDate) : null
+                    }
+                ]
+            };
+
+            await axios.put(`http://localhost:3000/api/products/${id}`, formData, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            setSubmitMessage("Updated successfully");
+            navigate('/products/my-products');
+        } catch (error) {
+            setSubmitMessage(t('error.submitFailed'));
+            console.error('Error submitting form:', error);
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
     return (
-        <Container className="mt-4">
-            <h2 className="text-center mb-4">{t('myProducts.title')}</h2>
-            {error && <div className="alert alert-danger">{error}</div>}
-            {loading ? (
-                <div className="text-center">
-                    <Spinner animation="border" role="status">
-                        <span className="sr-only">{t('myProducts.loading')}</span>
-                    </Spinner>
-                </div>
-            ) : (
-                <>
-                    <Row>
-                        {products.length > 0 ? (
-                            <>
-                                {products.map((product) => (
-                                    <Col md={4} key={product._id} className="mb-4">
-                                        <Card>
-                                            <Card.Img
-                                                variant="top"
-                                                src={product.images[0] || '/path/to/default-image.jpg'}
-                                                alt={product.name}
-                                                style={{ height: '200px', objectFit: 'cover' }}
-                                            />
-                                            <Card.Body>
-                                                <Card.Title>{product.name}</Card.Title>
-                                                <Card.Text>{product.description}</Card.Text>
-                                                <Card.Text>
-                                                    <strong>{t('myProducts.price')}: ₹{product.price.toFixed(2)}</strong>
-                                                </Card.Text>
-                                                <Card.Text>
-                                                    <small className="text-muted">{t('myProducts.location')}: {product.location}</small>
-                                                </Card.Text>
-                                                <Button variant="danger" onClick={() => handleDeleteProduct(product._id)}>
-                                                    {t('myProducts.deleteButton')}
-                                                </Button>
-                                            </Card.Body>
-                                        </Card>
-                                    </Col>
-                                ))}
-                            </>
-                        ) : (
-                            <Col className="text-center">
-                                <p>{t('myProducts.noProducts')}</p>
-                            </Col>
-                        )}
-                    </Row>
-                    <div className="text-center mt-4">
-                        <Button variant="primary" className='bttn' onClick={handleAddProductClick}>
-                            {t('myProducts.addProductButton')}
+        <div className="productform-container container mt-4">
+            <h2 className="text-center mb-4">{t('form.title')}</h2>
+            <Form onSubmit={handleSubmit}>
+                {submitMessage && (
+                    <Alert variant={submitMessage.includes("Updated successfully") ? 'success' : 'danger'}>
+                        {submitMessage}
+                    </Alert>
+                )}
+
+                <Row className="mb-3">
+                    <Col md={6}>
+                        <Form.Group controlId="productName">
+                            <Form.Label>{t('form.productName')}</Form.Label>
+                            <Form.Control
+                                type="text"
+                                placeholder={t('form.enterProductName')}
+                                value={productName}
+                                onChange={(e) => setProductName(e.target.value)}
+                                required
+                            />
+                            <Form.Text className="text-muted">
+                                {t('form.nameHint')}
+                            </Form.Text>
+                        </Form.Group>
+                    </Col>
+                    <Col md={6}>
+                        <Form.Group controlId="productPrice">
+                            <Form.Label>{t('form.productPrice')}</Form.Label>
+                            <Form.Control
+                                type="number"
+                                placeholder={t('form.enterProductPrice')}
+                                value={productPrice}
+                                onChange={(e) => setProductPrice(e.target.value)}
+                                required
+                                min="0"
+                                step="0.01"
+                            />
+                            <Form.Text className="text-muted">
+                                {t('form.priceHint')}
+                            </Form.Text>
+                        </Form.Group>
+                    </Col>
+                </Row>
+
+                <Form.Group controlId="productDescription" className="mb-3">
+                    <Form.Label>{t('form.productDescription')}</Form.Label>
+                    <Form.Control
+                        as="textarea"
+                        rows={4}
+                        placeholder={t('form.enterProductDescription')}
+                        value={productDescription}
+                        onChange={(e) => setProductDescription(e.target.value)}
+                        required
+                    />
+                </Form.Group>
+
+                <Form.Group className="mb-3">
+                    <Form.Label>{t('form.productCategory')}</Form.Label>
+                    <Form.Control
+                        as="select"
+                        value={productCategory}
+                        onChange={(e) => setProductCategory(e.target.value)}
+                        required
+                    >
+                        <option value="">{t('form.selectCategory')}</option>
+                        <option value="renting">{t('form.categoryRenting')}</option>
+                    </Form.Control>
+                </Form.Group>
+
+                {productCategory === 'renting' && (
+                    <>
+                        <Form.Group controlId="rentalDuration" className="mb-3">
+                            <Form.Label>{t('form.rentalDuration')}</Form.Label>
+                            <Form.Control
+                                as="select"
+                                value={rentalDuration}
+                                onChange={(e) => setRentalDuration(e.target.value)}
+                            >
+                                <option value="">{t('form.selectDuration')}</option>
+                                <option value="1 week">1 {t('form.week')}</option>
+                                <option value="1 month">1 {t('form.month')}</option>
+                                <option value="3 months">3 {t('form.months')}</option>
+                                <option value="6 months">6 {t('form.months')}</option>
+                                <option value="1 year">1 {t('form.year')}</option>
+                            </Form.Control>
+                            <Form.Text className="text-muted">
+                                {t('form.rentalDurationHint')}
+                            </Form.Text>
+                        </Form.Group>
+
+                        <Form.Group controlId="availabilityDates" className="mb-3">
+                            <Form.Label>{t('form.availabilityDates')}</Form.Label>
+                            <Row>
+                                <Col md={6}>
+                                    <Form.Label>{t('form.startDate')}</Form.Label>
+                                    <DatePicker
+                                        selected={availabilityDates.startDate}
+                                        onChange={(date) => setAvailabilityDates(prev => ({ ...prev, startDate: date }))}
+                                        className="form-control"
+                                        placeholderText={t('form.selectStartDate')}
+                                    />
+                                </Col>
+                                <Col md={6}>
+                                    <Form.Label>{t('form.endDate')}</Form.Label>
+                                    <DatePicker
+                                        selected={availabilityDates.endDate}
+                                        onChange={(date) => setAvailabilityDates(prev => ({ ...prev, endDate: date }))}
+                                        className="form-control"
+                                        placeholderText={t('form.selectEndDate')}
+                                        disabled
+                                    />
+                                </Col>
+                            </Row>
+                            <Form.Text className="text-muted">
+                                {t('form.availabilityDatesHint')}
+                            </Form.Text>
+                        </Form.Group>
+
+                        <Form.Group controlId="depositAmount" className="mb-3">
+                            <Form.Label>{t('form.depositAmount')}</Form.Label>
+                            <Form.Control
+                                type="number"
+                                placeholder={t('form.enterDepositAmount')}
+                                value={depositAmount}
+                                onChange={(e) => setDepositAmount(e.target.value)}
+                            />
+                            <Form.Text className="text-muted">
+                                {t('form.depositAmountHint')}
+                            </Form.Text>
+                        </Form.Group>
+
+                        <Form.Group controlId="condition" className="mb-3">
+                            <Form.Label>{t('form.condition')}</Form.Label>
+                            <Form.Control
+                                as="select"
+                                value={condition}
+                                onChange={(e) => setCondition(e.target.value)}
+                            >
+                                <option value="">{t('form.selectCondition')}</option>
+                                <option value="new">{t('form.conditionNew')}</option>
+                                <option value="used">{t('form.conditionUsed')}</option>
+                                <option value="refurbished">{t('form.conditionRefurbished')}</option>
+                            </Form.Control>
+                        </Form.Group>
+                    </>
+                )}
+
+                <Form.Group controlId="contactInfo" className="mb-3">
+                    <Form.Label>{t('form.contactInfo')}</Form.Label>
+                    <Form.Control
+                        type="text"
+                        placeholder={t('form.enterPhoneNumber')}
+                        value={contactInfo.phone}
+                        onChange={(e) => setContactInfo(prev => ({ ...prev, phone: e.target.value }))}
+                        className="mb-2"
+                    />
+                    <Form.Control
+                        type="email"
+                        placeholder={t('form.enterEmail')}
+                        value={contactInfo.email}
+                        onChange={(e) => setContactInfo(prev => ({ ...prev, email: e.target.value }))}
+                    />
+                </Form.Group>
+
+                <Row className="mb-3">
+                    <Col md={6}>
+                        <Form.Group controlId="productImages">
+                            <Form.Label>{t('form.productImages')}</Form.Label>
+                            <Form.Control
+                                type="file"
+                                multiple
+                                onChange={handleImageChange}
+                            />
+                            {imageError && <Alert variant="danger" className="mt-2">{imageError}</Alert>}
+                        </Form.Group>
+
+                        <Form.Group controlId="location" className="mt-3">
+                            <Form.Label>{t('form.location')}</Form.Label>
+                            <Form.Control
+                                type="text"
+                                placeholder={t('form.enterLocation')}
+                                value={location}
+                                onChange={(e) => setLocation(e.target.value)}
+                                required
+                            />
+                        </Form.Group>
+
+                        <Button
+                            variant="primary"
+                            type="submit"
+                            className="bttn"
+                            disabled={isSubmitting}
+                        >
+                            {isSubmitting ? <Spinner animation="border" size="sm" /> : t('form.submit')}
                         </Button>
-                    </div>
-                </>
-            )}
-        </Container>
+                    </Col>
+
+                    <Col md={6}>
+                        {productImages.length > 0 && (
+                            <Form.Group className="mt-3">
+                                <Form.Label>{t('form.imagePreview')}</Form.Label>
+                                <Card>
+                                    <Carousel>
+                                        {Array.from(productImages).map((file, index) => (
+                                            <Carousel.Item key={index}>
+                                                <img
+                                                    src={URL.createObjectURL(file)}
+                                                    alt={`Preview ${index}`}
+                                                    className="d-block w-100"
+                                                    style={{ height: 'auto', maxHeight: '300px' }}
+                                                />
+                                                <Button
+                                                    variant="danger"
+                                                    size="sm"
+                                                    className="position-absolute top-0 end-0 m-2"
+                                                    onClick={() => removeImage(index)}
+                                                >
+                                                    <i className="bi bi-x-circle"></i>
+                                                </Button>
+                                            </Carousel.Item>
+                                        ))}
+                                        {existingImages.map((url, index) => (
+                                            <Carousel.Item key={index}>
+                                                <img
+                                                    src={url}
+                                                    alt={`Existing Preview ${index}`}
+                                                    className="d-block w-100"
+                                                    style={{ height: 'auto', maxHeight: '300px' }}
+                                                />
+                                            </Carousel.Item>
+                                        ))}
+                                    </Carousel>
+                                </Card>
+                            </Form.Group>
+                        )}
+                    </Col>
+                </Row>
+            </Form>
+        </div>
     );
 };
 
-export default MyProducts;
+export default ProductForm;
